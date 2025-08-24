@@ -34,6 +34,18 @@ predict = dlib.shape_predictor("models/shape_predictor_68_face_landmarks.dat")
 # Initialize normalization layer
 normalization_layer = layers.Normalization()
 
+# Load saved normalization stats (mean, variance) produced in [train.py](http://_vscodecontentref_/2)
+try:
+    norm_mean = np.load("norm_mean.npy")
+    norm_var = np.load("norm_var.npy")
+    # precompute std to avoid dividing by zero
+    norm_std = np.sqrt(norm_var + 1e-8)
+    print("Loaded normalization stats:", norm_mean.shape)
+except Exception as e:
+    print("Warning: could not load normalization stats, falling back to /255.0", e)
+    norm_mean = None
+    norm_std = None
+
 # Configure parameters
 detection_threshold = 10  # Number of consecutive frames detecting drowsiness to trigger alert
 frame_counter = 0
@@ -79,11 +91,16 @@ def preprocess_eye(eye_region):
     eye_rgb = cv2.cvtColor(eye_region, cv2.COLOR_BGR2RGB)
     
     # Resize the eye region to the input size of the model (224x224)
-    eye_resized = cv2.resize(eye_rgb, (224, 224))
+    eye_resized = cv2.resize(eye_rgb, (224, 224)).astype(np.float32)
     
-    # Normalize the eye region
-    normalization_layer.adapt(eye_resized)
-    normalized_eye = normalization_layer(eye_resized)
+    # --- PHẦN SỬA LỖI QUAN TRỌNG ---
+    # Áp dụng chuẩn hóa đã học từ file train.py, KHÔNG adapt() lại.
+    if norm_mean is not None and norm_std is not None:
+        # Dùng mean và std đã load để chuẩn hóa
+        normalized_eye = (eye_resized - norm_mean) / norm_std
+    else:
+        # Phương án dự phòng nếu không load được file norm
+        normalized_eye = eye_resized / 255.0
     
     # Add batch dimension
     return np.expand_dims(normalized_eye, axis=0)
