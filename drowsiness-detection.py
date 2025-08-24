@@ -34,6 +34,18 @@ predict = dlib.shape_predictor("models/shape_predictor_68_face_landmarks.dat")
 # Initialize normalization layer
 normalization_layer = layers.Normalization()
 
+# Load saved normalization stats (mean, variance) produced in [train.py](http://_vscodecontentref_/2)
+try:
+    norm_mean = np.load("norm_mean.npy")
+    norm_var = np.load("norm_var.npy")
+    # precompute std to avoid dividing by zero
+    norm_std = np.sqrt(norm_var + 1e-8)
+    print("Loaded normalization stats:", norm_mean.shape)
+except Exception as e:
+    print("Warning: could not load normalization stats, falling back to /255.0", e)
+    norm_mean = None
+    norm_std = None
+
 # Configure parameters
 detection_threshold = 10  # Number of consecutive frames detecting drowsiness to trigger alert
 frame_counter = 0
@@ -79,14 +91,20 @@ def preprocess_eye(eye_region):
     eye_rgb = cv2.cvtColor(eye_region, cv2.COLOR_BGR2RGB)
     
     # Resize the eye region to the input size of the model (224x224)
-    eye_resized = cv2.resize(eye_rgb, (224, 224))
+    eye_resized = cv2.resize(eye_rgb, (224, 224)).astype(np.float32)
     
-    # Normalize the eye region
-    normalization_layer.adapt(eye_resized)
-    normalized_eye = normalization_layer(eye_resized)
+    # --- PHẦN SỬA LỖI QUAN TRỌNG ---
+    # Áp dụng chuẩn hóa đã học từ file train.py, KHÔNG adapt() lại.
+    if norm_mean is not None and norm_std is not None:
+        # Dùng mean và std đã load để chuẩn hóa
+        normalized_eye = (eye_resized - norm_mean) / norm_std
+    else:
+        # Phương án dự phòng nếu không load được file norm
+        normalized_eye = eye_resized / 255.0
     
     # Add batch dimension
     return np.expand_dims(normalized_eye, axis=0)
+
 
 def preprocess_frame(frame):
     frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -97,10 +115,29 @@ def preprocess_frame(frame):
     return np.expand_dims(frame_array, axis=0)
 
 def get_prediction(preprocessed_frame):
+    # --- PHẦN SỬA LỖI QUAN TRỌNG ---
+    # Đảm bảo dữ liệu đầu vào là một mảng numpy
+    arr = np.asarray(preprocessed_frame, dtype=np.float32)
+
+    # Vòng lặp phòng thủ: loại bỏ các chiều không cần thiết (kích thước 1)
+    # Ví dụ: biến (1, 1, 224, 224, 3) thành (1, 224, 224, 3)
+    while arr.ndim > 4:
+        arr = np.squeeze(arr, axis=1)
+
+    # Đảm bảo có chiều batch: nếu là (224, 224, 3) thì thêm chiều batch
+    if arr.ndim == 3:
+        arr = np.expand_dims(arr, axis=0)
+
+    # Kiểm tra cuối cùng trước khi dự đoán
+    if arr.shape != (1, 224, 224, 3):
+        # Nếu shape vẫn sai, báo lỗi để dễ debug
+        print(f"Error: Invalid shape before prediction: {arr.shape}")
+        return "Error", 0.0, -1 # Trả về giá trị lỗi
+
     # Predict on preprocessed frame
-    prediction = model.predict(preprocessed_frame, verbose=0)
+    prediction = model.predict(arr, verbose=0)
     class_idx = np.argmax(prediction)
-    confidence = prediction[0][class_idx]
+    confidence = float(prediction[0][class_idx])
     class_name = class_names[class_idx]
     return class_name, confidence, class_idx
 
@@ -115,6 +152,10 @@ if not cap.isOpened():
     exit()
 
 while True:
+    # Khởi tạo giá trị mặc định cho mỗi frame
+    class_idx = 1  # Mặc định là "Open"
+    class_name = "Open"
+    confidence = 1.0
     # Read frame from webcam
     ret, frame = cap.read()
     if not ret:

@@ -67,6 +67,7 @@ for dir in os.listdir(train_data):
     if dir in ['Closed', 'Open']:
         full_path = os.path.join(train_data,dir)
         files = gb.glob(pathname = str(full_path + '/*.jpg'))
+        print(f'lenght of files {len(files)} in {dir}')
         for file in files:
             image = plt.imread(file)
             size.append(image.shape)
@@ -119,8 +120,13 @@ print("Shape of y_train:", y_train.shape)
 print("Shape of y_test:", y_test.shape)
 
 normalization_layer = layers.Normalization()
-
 normalization_layer.adapt(X_train)
+
+# Save normalization stats so we can reuse them at inference time
+norm_mean = normalization_layer.mean.numpy()
+norm_var = normalization_layer.variance.numpy()
+np.save("norm_mean.npy", norm_mean)
+np.save("norm_var.npy", norm_var)
 
 X_train = normalization_layer(X_train)
 X_test = normalization_layer(X_test)

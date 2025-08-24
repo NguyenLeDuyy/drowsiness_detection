@@ -10,7 +10,7 @@ import seaborn as sns
 from sklearn.metrics import confusion_matrix
 
 # Root directory to search for images
-BASE_DIR = "test"  # Change to your image folder
+BASE_DIR = "dataset/test"  # Change to your image folder
 
 # Load the trained model
 try:
@@ -23,6 +23,16 @@ except:
     except:
         print("Error: Model not found!")
         exit()
+
+try:
+    norm_mean = np.load("norm_mean.npy")
+    norm_var = np.load("norm_var.npy")
+    norm_std = np.sqrt(norm_var + 1e-8)
+    print("Loaded normalization stats for test:", norm_mean.shape)
+except Exception as e:
+    print("Warning: could not load normalization stats, falling back to /255.0", e)
+    norm_mean = None
+    norm_std = None
 
 # Declare class names
 class_names = {0: 'Closed', 1: 'Open'}
@@ -43,20 +53,43 @@ def find_all_images(base_dir):
     return image_paths
 
 def preprocess_frame(frame):
+    # convert & resize
     frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    frame_array = cv2.resize(frame, (224,224))
-    normalization_layer = layers.Normalization()
-    normalization_layer.adapt(frame_array)
-    frame_array = normalization_layer(frame_array)
+    frame_array = cv2.resize(frame, (224, 224)).astype(np.float32)
+
+    # apply saved normalization or fallback
+    if norm_mean is not None and norm_std is not None:
+        # norm_mean/norm_std shape should be (3,)
+        frame_array = (frame_array - norm_mean) / norm_std
+    else:
+        frame_array = frame_array / 255.0
+
+    # Defensive: ensure we have shape (224,224,3)
+    # If shape is (1,224,224,3) or (224,224,3,1) etc. -> squeeze
+    if frame_array.ndim > 3:
+        frame_array = np.squeeze(frame_array)
+    # Final expand to batch dimension -> (1,224,224,3)
     return np.expand_dims(frame_array, axis=0)
 
 def get_prediction(preprocessed_frame):
-    # Predict on the preprocessed frame
-    prediction = model.predict(preprocessed_frame, verbose=0)
+    # ensure numpy array and correct dtype
+    arr = np.asarray(preprocessed_frame, dtype=np.float32)
+
+    # Defensive: if there is an extra singleton dimension (e.g. (1,1,224,224,3)), remove it
+    while arr.ndim > 4:
+        # remove first axis of size 1
+        arr = np.squeeze(arr, axis=1)
+
+    # If shape is (1,224,224,3) it's OK. If not, try to reshape if possible (will raise if incompatible)
+    if arr.ndim == 3:
+        arr = np.expand_dims(arr, axis=0)
+    if arr.shape[-3:] != (224, 224, 3):
+        raise ValueError(f"Unexpected input image shape before predict: {arr.shape}")
+
+    prediction = model.predict(arr, verbose=0)
     class_idx = np.argmax(prediction)
     confidence = prediction[0][class_idx]
     class_name = class_names[class_idx]
-    
     return class_name, confidence, class_idx, prediction[0]
 
 def is_drowsy(class_idx):
