@@ -24,16 +24,6 @@ except:
         print("Error: Model not found!")
         exit()
 
-try:
-    norm_mean = np.load("norm_mean.npy")
-    norm_var = np.load("norm_var.npy")
-    norm_std = np.sqrt(norm_var + 1e-8)
-    print("Loaded normalization stats for test:", norm_mean.shape)
-except Exception as e:
-    print("Warning: could not load normalization stats, falling back to /255.0", e)
-    norm_mean = None
-    norm_std = None
-
 # Declare class names
 class_names = {0: 'Closed', 1: 'Open'}
 
@@ -52,8 +42,19 @@ def find_all_images(base_dir):
     print(f"Found {len(image_paths)} images to analyze in Open/Closed directories")
     return image_paths
 
+# Load saved normalization stats (same as train.py)
+try:
+    norm_mean = np.load("norm_mean.npy")
+    norm_var = np.load("norm_var.npy")
+    norm_std = np.sqrt(norm_var + 1e-8)
+    print("Loaded normalization stats for test:", norm_mean.shape)
+except Exception as e:
+    print("Warning: could not load normalization stats, falling back to /255.0", e)
+    norm_mean = None
+    norm_std = None
+
 def preprocess_frame(frame):
-    # convert & resize
+     # convert & resize
     frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     frame_array = cv2.resize(frame, (224, 224)).astype(np.float32)
 
