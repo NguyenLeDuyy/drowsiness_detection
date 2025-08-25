@@ -67,6 +67,7 @@ for dir in os.listdir(train_data):
     if dir in ['Closed', 'Open']:
         full_path = os.path.join(train_data,dir)
         files = gb.glob(pathname = str(full_path + '/*.jpg'))
+        print(f'lenght of files {len(files)} in {dir}')
         for file in files:
             image = plt.imread(file)
             size.append(image.shape)
