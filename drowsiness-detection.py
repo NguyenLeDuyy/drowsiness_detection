@@ -37,8 +37,21 @@ normalization_layer = layers.Normalization()
 # Load saved normalization stats (mean, variance) produced in [train.py](http://_vscodecontentref_/2)
 try:
     norm_mean = np.load("norm_mean.npy")
-    norm_var = np.load("norm_var.npy")
-    # precompute std to avoid dividing by zero
+    norm_var  = np.load("norm_var.npy")
+    # clean up shapes: want either (3,) or (1,1,3)
+    norm_mean = np.asarray(norm_mean)
+    norm_var  = np.asarray(norm_var)
+
+    # remove accidental extra dims
+    norm_mean = np.squeeze(norm_mean)
+    norm_var  = np.squeeze(norm_var)
+
+    # final reshape to (1,1,3) for broadcasting convenience
+    if norm_mean.ndim == 1 and norm_mean.size == 3:
+        norm_mean = norm_mean.reshape((1,1,3))
+    if norm_var.ndim == 1 and norm_var.size == 3:
+        norm_var = norm_var.reshape((1,1,3))
+
     norm_std = np.sqrt(norm_var + 1e-8)
     print("Loaded normalization stats:", norm_mean.shape)
 except Exception as e:
@@ -83,43 +96,63 @@ def extract_eye_region(eye_points, frame):
     return eye_region, x_start, y_start, x_end-x_start, y_end-y_start
 
 def preprocess_eye(eye_region):
-    # Check if eye region is valid
     if eye_region is None or eye_region.size == 0:
         return None
-        
-    # Change color space from BGR to RGB
-    eye_rgb = cv2.cvtColor(eye_region, cv2.COLOR_BGR2RGB)
     
-    # Resize the eye region to the input size of the model (224x224)
+    eye_rgb = cv2.cvtColor(eye_region, cv2.COLOR_BGR2RGB)
     eye_resized = cv2.resize(eye_rgb, (224, 224)).astype(np.float32)
     
-    # --- PHẦN SỬA LỖI QUAN TRỌNG ---
-    # Áp dụng chuẩn hóa đã học từ file train.py, KHÔNG adapt() lại.
+    # Áp dụng chuẩn hóa đã học, KHÔNG adapt lại
     if norm_mean is not None and norm_std is not None:
-        # Dùng mean và std đã load để chuẩn hóa
         normalized_eye = (eye_resized - norm_mean) / norm_std
     else:
-        # Phương án dự phòng nếu không load được file norm
+        # Fallback nếu không có file norm
         normalized_eye = eye_resized / 255.0
     
-    # Add batch dimension
     return np.expand_dims(normalized_eye, axis=0)
 
 def preprocess_frame(frame):
-    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    frame_array = cv2.resize(frame, (224,224))
-    normalization_layer.adapt(frame_array)
-    frame_array = normalization_layer(frame_array)
-    
-    return np.expand_dims(frame_array, axis=0)
+    # HÀM NÀY KHÔNG ĐƯỢC SỬ DỤNG VÀ CÓ LOGIC SAI.
+    # CÓ THỂ XÓA ĐI ĐỂ TRÁNH NHẦM LẪN.
+    # Hoặc sửa lại cho đúng nếu sau này cần dùng.
+    # Tạm thời thầy sẽ comment nó ra.
+    # frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    # frame_array = cv2.resize(frame, (224,224)).astype(np.float32)
+    # if norm_mean is not None and norm_std is not None:
+    #     frame_array = (frame_array - norm_mean) / norm_std
+    # else:
+    #     frame_array = frame_array / 255.0
+    # return np.expand_dims(frame_array, axis=0)
+    pass # Không làm gì cả
 
 def get_prediction(preprocessed_frame):
+    # --- PHẦN SỬA LỖI QUAN TRỌNG ---
+    # Đảm bảo dữ liệu đầu vào là một mảng numpy
+    arr = np.asarray(preprocessed_frame, dtype=np.float32)
+
+    # Vòng lặp phòng thủ: loại bỏ các chiều không cần thiết (kích thước 1)
+    while arr.ndim > 4:
+        arr = np.squeeze(arr, axis=1)
+
+    # Đảm bảo có chiều batch: nếu là (224, 224, 3) thì thêm chiều batch
+    if arr.ndim == 3:
+        arr = np.expand_dims(arr, axis=0)
+
+    # Kiểm tra cuối cùng trước khi dự đoán
+    if arr.shape != (1, 224, 224, 3):
+        print(f"Error: Invalid shape before prediction: {arr.shape}")
+        # Trả về giá trị mặc định an toàn
+        return "Error", 0.0, -1, np.array([0.0, 1.0]) 
+
     # Predict on preprocessed frame
-    prediction = model.predict(preprocessed_frame, verbose=0)
-    class_idx = np.argmax(prediction)
-    confidence = prediction[0][class_idx]
+    prediction = model.predict(arr, verbose=0)
+    probs = prediction[0] # Lấy vector xác suất
+    class_idx = np.argmax(probs)
+    confidence = float(probs[class_idx])
     class_name = class_names[class_idx]
-    return class_name, confidence, class_idx
+    
+    # Trả về các biến ĐÚNG đã được tính toán trong hàm này
+    return class_name, confidence, class_idx, probs
 
 def is_drowsy(class_idx):
     # Determine drowsy state: closed eyes (0) are considered drowsy
@@ -137,6 +170,11 @@ while True:
     if not ret:
         print("Error: Cannot read frame from camera")
         break
+
+    # Khởi tạo giá trị mặc định cho mỗi frame
+    class_idx = 1  # Mặc định là "Open"
+    class_name = "Open"
+    confidence = 1.0
         
     # Flip frame horizontally for easier front camera usage
     frame = cv2.flip(frame, 1)
@@ -167,35 +205,45 @@ while True:
             frame[10:110, frame.shape[1]-110:frame.shape[1]-10] = display_right_eye
             frame[10:110, frame.shape[1]-220:frame.shape[1]-120] = display_left_eye
             
+            # Khởi tạo giá trị mặc định an toàn cho mỗi frame
+            left_class_idx, right_class_idx = 1, 1 
+            left_confidence, right_confidence = 0.0, 0.0
+            left_probs = right_probs = np.array([0.0, 1.0]) # Mặc định là Open
+
             # Process and predict for left eye
             processed_left_eye = preprocess_eye(left_eye_region)
             if processed_left_eye is not None:
-                left_class_name, left_confidence, left_class_idx = get_prediction(processed_left_eye)
-                
-                # Display result for left eye
-                cv2.putText(frame, f"Left: {left_class_name}", (frame.shape[1]-220, 130), 
+                left_class_name, left_confidence, left_class_idx, left_probs = get_prediction(processed_left_eye)
+                cv2.putText(frame, f"Left: {left_class_name} ({left_confidence:.2f})", (frame.shape[1]-220, 130), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
             
             # Process and predict for right eye
             processed_right_eye = preprocess_eye(right_eye_region)
             if processed_right_eye is not None:
-                right_class_name, right_confidence, right_class_idx = get_prediction(processed_right_eye)
-                
-                # Display result for right eye
-                cv2.putText(frame, f"Right: {right_class_name}", (frame.shape[1]-110, 130), 
+                right_class_name, right_confidence, right_class_idx, right_probs = get_prediction(processed_right_eye)
+                cv2.putText(frame, f"Right: {right_class_name} ({right_confidence:.2f})", (frame.shape[1]-110, 130), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
             
-            # Determine drowsiness state based on both eyes
-            if processed_left_eye is not None and processed_right_eye is not None:
-                # Check if both eyes are closed
-                if left_class_idx == 0 or right_class_idx == 0:
-                    class_idx = 0
-                    class_name = "Closed"
-                    confidence = max(left_confidence, right_confidence)
-                else:
-                    class_idx = 1
-                    class_name = "Open" 
-                    confidence = (left_confidence + right_confidence) / 2.0
+            # --- LOGIC QUYẾT ĐỊNH MỚI, CHẶT CHẼ HƠN ---
+            CONF_THRESHOLD = 0.80 # Ngưỡng tin cậy cao để xác nhận mắt đóng
+
+            # Điều kiện 1: Cả hai mắt đều được dự đoán là "Closed" (AND logic)
+            both_closed = (left_class_idx == 0 and right_class_idx == 0)
+            
+            # Điều kiện 2: Một mắt được dự đoán là "Closed" với độ tin cậy RẤT CAO
+            left_strong_closed = (left_class_idx == 0 and left_confidence >= CONF_THRESHOLD)
+            right_strong_closed = (right_class_idx == 0 and right_confidence >= CONF_THRESHOLD)
+
+            if both_closed or left_strong_closed or right_strong_closed:
+                class_idx = 0
+                class_name = "Closed"
+                # Lấy confidence của dự đoán mạnh nhất cho trạng thái "Closed"
+                confidence = max(left_probs[0], right_probs[0]) 
+            else:
+                class_idx = 1
+                class_name = "Open" 
+                # Lấy trung bình confidence cho trạng thái "Open"
+                confidence = (left_probs[1] + right_probs[1]) / 2.0
   
     # Calculate FPS
     fps_counter += 1
